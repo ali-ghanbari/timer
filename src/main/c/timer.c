@@ -5,10 +5,11 @@
 #include <time.h>
 
 #include "hashtable.h"
+#include "stack.h"
 #include "types.h"
 
 typedef struct {
-  struct timespec start;
+  STACK start_ts;
   DWORD max_us;
 } METH_INFO;
 
@@ -26,18 +27,19 @@ typedef struct {
 
 static GlobalAgentData *gdata;
 
-BOOL filter(const char *cls_name)
+static inline BOOL filter(const char *cls_name)
 {
   int lenpre = gdata->prefix_len;
   int lenstr = strlen(cls_name);
   return lenstr < lenpre ? FALSE : strncmp(gdata->prefix, cls_name, lenpre) == 0;
 }
 
-DWORD max(DWORD a, DWORD b) {
+static inline DWORD max(DWORD a, DWORD b)
+{
   return a >= b ? a : b;
 }
 
-BOOL check_jvmti_error(jvmtiEnv *jvmti, jvmtiError errnum, const char *str)
+static inline BOOL check_jvmti_error(jvmtiEnv *jvmti, jvmtiError errnum, const char *str)
 {
   if (errnum != JVMTI_ERROR_NONE) {
     char *errnum_str;
@@ -117,30 +119,61 @@ void JNICALL method_entry_handler(jvmtiEnv *jvmti,
   jvmtiError err;
   jclass cls;
   char *cls_name;
-  char *name;
-  char *sig;
   err = (*jvmti)->GetMethodDeclaringClass(jvmti, method, &cls);
   check_jvmti_error(jvmti, err, "unable to retrieve declaring class");
   err = (*jvmti)->GetClassSignature(jvmti, cls, &cls_name, NULL);
   check_jvmti_error(jvmti, err, "unable to retrieve class signature");
   if (!filter(cls_name)) {
+    free(cls_name);
     return;
   }
-  METH_INFO *mi = (METH_INFO *) malloc(sizeof(METH_INFO));
-  if (mi == NULL) {
-    return;
-  }
-  clock_gettime(CLOCK_MONOTONIC_RAW, &(mi->start));
+  struct timespec start;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+  char *name;
+  char *sig;
   err = (*jvmti)->GetMethodName(jvmti, method, &name, &sig, NULL);
   check_jvmti_error(jvmti, err, "unable to retrieve method name and/or signature");
-  const int len = strlen(cls_name) + strlen(name) + strlen(sig);
-  char *full_name = (char *) malloc(1 + len);
-  if (full_name == NULL) {
+  //const int len = strlen(cls_name) + strlen(name) + strlen(sig);
+  //char *full_name = (char *) malloc(1 + len);
+  //static char full_name[1024];
+  //if (full_name == NULL) {
+  //  return;
+  //}
+  //sprintf(full_name, "%s%s%s", cls_name, name, sig);
+  //free(cls_name);
+  //free(name);
+  //free(sig);
+  //free(full_name);
+  int status;
+  LIST_NODE *entry = hashtable_insert(gdata->methods_stat, cls_name, name, sig, &status);
+  if (status == HASHTABLE_ERROR) {
+    free(cls_name);
+    free(name);
+    free(sig);
     return;
   }
-  sprintf(full_name, "%s%s%s", cls_name, name, sig);
-  hashtable_insert(gdata->methods_stat, full_name, mi);
-  // do not free full_name
+  if (status == HASHTABLE_EXISTING) {
+    METH_INFO *mi = (METH_INFO *) hashtable_entry_get_value(entry);
+    stack_push(&(mi->start_ts), &start);
+    // we do not need these anymore
+    free(cls_name);
+    free(name);
+    free(sig);
+  } else {
+    METH_INFO *mi = (METH_INFO *) malloc(sizeof(METH_INFO));
+    if (mi == NULL) {
+      free(cls_name);
+      free(name);
+      free(sig);
+      return;
+    }
+    //memcpy(&(mi->start), &start, sizeof(struct timespec));
+    mi->start_ts = stack_create();
+    mi->max_us = 0;
+    stack_push(&(mi->start_ts), &start);
+    hashtable_entry_set_value(entry, mi); 
+    // do not free cls_name, name, or sig as we are using them
+  }
 }
 
 void JNICALL method_exit_handler(jvmtiEnv *jvmti,
@@ -150,37 +183,53 @@ void JNICALL method_exit_handler(jvmtiEnv *jvmti,
 				 jboolean was_popped_by_exception,
 				 jvalue return_value)
 {
-  struct timespec end;
   jvmtiError err;
   jclass cls;
   char *cls_name;
-  char *name;
-  char *sig;
-
   err = (*jvmti)->GetMethodDeclaringClass(jvmti, method, &cls);
   check_jvmti_error(jvmti, err, "unable to retrieve declaring class");
   err = (*jvmti)->GetClassSignature(jvmti, cls, &cls_name, NULL);
   check_jvmti_error(jvmti, err, "unable to retrieve class signature");
   if (!filter(cls_name)) {
+    free(cls_name);
     return;
   }
+  struct timespec end;
   clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  char *name;
+  char *sig;
   err = (*jvmti)->GetMethodName(jvmti, method, &name, &sig, NULL);
   check_jvmti_error(jvmti, err, "unable to retrieve method name and/or signature");
-  const int len = strlen(cls_name) + strlen(name) + strlen(sig);
-  char *full_name = (char *) malloc(1 + len);
-  if (full_name == NULL) {
-    return;
-  }
-  sprintf(full_name, "%s%s%s", cls_name, name, sig);
-  METH_INFO *mi = hashtable_get(gdata->methods_stat, full_name);
+  //static char full_name[1024];
+  //const int len = strlen(cls_name) + strlen(name) + strlen(sig);
+  //char *full_name = (char *) malloc(1 + len);
+  //if (full_name == NULL) {
+  //  return;
+  //}
+  //sprintf(full_name, "%s%s%s", cls_name, name, sig);
+  //free(cls_name);
+  //free(name);
+  //free(sig);
+  //free(full_name);
+  //return;
+  METH_INFO *mi = (METH_INFO *) hashtable_get(gdata->methods_stat, cls_name, name, sig);
   if (mi == NULL) {
-    free(full_name);
+    printf("fatal\n");
+    free(cls_name);
+    free(name);
+    free(sig);
     return;
   }
-  DWORD delta_us = (end.tv_sec - (mi->start).tv_sec) * 1000000 + (end.tv_nsec - (mi->start).tv_nsec) / 1000;
-  mi->max_us = max(mi->max_us, delta_us);
-  free(full_name);
+  STACK_NODE *top = stack_pop(&(mi->start_ts));
+  if (top != NULL) {
+    struct timespec *start = stack_node_get_value(top);
+    DWORD delta_us = (end.tv_sec - start->tv_sec) * 1000000 + (end.tv_nsec - start->tv_nsec) / 1000;
+    mi->max_us = max(mi->max_us, delta_us);
+    free(top);
+  }
+  free(cls_name);
+  free(name);
+  free(sig);
 }
 
 BOOL make_prefix(const char *raw_prefix)
@@ -206,8 +255,22 @@ BOOL make_prefix(const char *raw_prefix)
   return TRUE;
 }
 
-void visitor(const char *key, void *value) {
-  printf("%s ==> %ld us\n", key, ((METH_INFO *) value)->max_us);
+void printer_visitor(const char *key_cls_name, const char *key_meth_name, const char *key_meth_sig, void *value)
+{
+  printf("%s%s%s ==> %ld us\n", key_cls_name, key_meth_name, key_meth_sig, ((METH_INFO *) value)->max_us);
+}
+
+void freeing_visitor(void *value)
+{
+  METH_INFO *mi = (METH_INFO *) value;
+  STACK_NODE *top = NULL;
+  do {
+    top = stack_pop(&(mi->start_ts));
+    if (top != NULL) {
+      free(top);
+    }
+  } while (top != NULL);
+  free(value);
 }
 
 JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *jvm, char *options, void *reserved)
@@ -295,7 +358,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *jvm, char *options, void *reserved)
 
 JNIEXPORT void JNICALL Agent_OnUnload(JavaVM *vm)
 {
-  hashtable_iterate(gdata->methods_stat, &visitor);
+  hashtable_iterate(gdata->methods_stat, &printer_visitor);
   free(gdata->prefix);
-  hashtable_free(gdata->methods_stat);
+  hashtable_free(gdata->methods_stat, &freeing_visitor);
 }

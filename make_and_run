@@ -1,6 +1,7 @@
 #!/bin/bash
 
 cd src/main/c
-gcc -fPIC -shared -o libtimer.so -I /opt/jdk1.7.0_80/include -I /opt/jdk1.7.0_80/include/linux hashtable.c timer.c
+gcc -fPIC -shared -o libtimer.so -I /opt/jdk1.7.0_80/include -I /opt/jdk1.7.0_80/include/linux hashtable.c stack.c timer.c
 cd ../../..
+unset JAVA_TOOL_OPTIONS
 $JAVA_HOME/bin/java -agentpath:src/main/c/libtimer.so="org.mudebug" -cp target/classes org.mudebug.Main
